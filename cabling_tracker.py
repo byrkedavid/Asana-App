@@ -3,23 +3,27 @@ import os
 from dotenv import load_dotenv
 import streamlit as st
 import re
-import base64
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 load_dotenv()
 
 def get_config_value(name, default=None):
     env_value = os.getenv(name)
-    if env_value is not None:
-        return env_value
+    if env_value is not None and env_value.strip():
+        return env_value.strip()
 
     try:
-        return st.secrets.get(name, default)
+        secret_value = st.secrets.get(name, default)
     except st.errors.StreamlitSecretNotFoundError:
         return default
 
+    if isinstance(secret_value, str):
+        secret_value = secret_value.strip()
+
+    return secret_value or default
+
 ASANA_TOKEN = get_config_value("ASANA_TOKEN")
-OPENAI_API_KEY = get_config_value("OPENAI_API_KEY")
-OPENAI_VISION_MODEL = get_config_value("OPENAI_VISION_MODEL", "gpt-4.1-mini")
+OCR_SPACE_API_KEY = get_config_value("OCR_SPACE_API_KEY")
 WORKSPACE_ID = "1214051352006115"
 PROJECT_ID = "1214024107011760"
 
@@ -61,26 +65,41 @@ ENUM_IDS = {
 
 ## Find tasks
 
+@st.cache_data(ttl=60)
+def get_project_task_map():
+    task_map = {}
+    params = {
+        "opt_fields": "gid,name",
+        "limit": 100,
+    }
+
+    while True:
+        response = requests.get(
+            f"https://app.asana.com/api/1.0/projects/{PROJECT_ID}/tasks",
+            headers=headers,
+            params=params,
+        )
+        response.raise_for_status()
+        response_data = response.json()
+
+        for task in response_data["data"]:
+            task_map[task["name"]] = task["gid"]
+
+        next_page = response_data.get("next_page")
+        if not next_page:
+            break
+
+        params["offset"] = next_page["offset"]
+
+    return task_map
+
+
 def find_task_by_name(position):
-    response = requests.get(
-        f"https://app.asana.com/api/1.0/projects/{PROJECT_ID}/tasks",
-        headers=headers,
-        params={
-            "opt_fields": "gid,name",
-            "limit": 100,
-        },
-    )
-    response.raise_for_status()
-    tasks = response.json()["data"]
-
-    for task in tasks:
-        if task["name"] == position:
-            return task["gid"]
-
-    return None
+    return get_project_task_map().get(position)
 
 
 ## Fetch users
+@st.cache_data(ttl=300)
 def fetch_display_users():
     response = requests.get(
         f"https://app.asana.com/api/1.0/workspaces/{WORKSPACE_ID}/users",
@@ -138,7 +157,7 @@ def people_values(names):
 
     return gids
 
-def update_task(position, site, fiber_ran, copper_ran, brick_patched, fusion_patched, runners, brick_patcher, fusion_patcher):
+def update_task(position, site, fiber_ran, copper_ran, brick_patched, fusion_patched, runners, brick_patcher, fusion_patcher, task_gid=None):
     custom_fields = {
         FIELD_IDS["atl_site"]: SITE_OPTIONS[site],
         FIELD_IDS["fiber_ran"]: ENUM_IDS["fiber_ran"][fiber_ran],
@@ -164,7 +183,7 @@ def update_task(position, site, fiber_ran, copper_ran, brick_patched, fusion_pat
         custom_fields[FIELD_IDS["fusion_patcher"]] = fusion_patcher_value
 
 
-    task_gid = find_task_by_name(position)
+    task_gid = task_gid or find_task_by_name(position)
     if not task_gid:
         raise ValueError(f"Task not found: {position}")
 
@@ -206,27 +225,7 @@ def get_site_options():
 
 
 def get_existing_task_names():
-    response = requests.get(
-        f"https://app.asana.com/api/1.0/projects/{PROJECT_ID}/tasks",
-        headers=headers,
-        params={"opt_fields": "name", "limit": 100},
-    )
-    response.raise_for_status()
-    tasks = response.json()["data"]
-    return {task["name"] for task in tasks}
-
-
-def response_output_text(response_data):
-    if response_data.get("output_text"):
-        return response_data["output_text"]
-
-    output_parts = []
-    for item in response_data.get("output", []):
-        for content in item.get("content", []):
-            if content.get("type") in {"output_text", "text"} and content.get("text"):
-                output_parts.append(content["text"])
-
-    return "\n".join(output_parts)
+    return set(get_project_task_map().keys())
 
 
 def normalize_position_lines(raw_text):
@@ -250,48 +249,40 @@ def normalize_position_lines(raw_text):
 
 
 def extract_positions_from_image(image_file):
-    if not OPENAI_API_KEY:
-        raise ValueError("Add OPENAI_API_KEY to your .env file to use photo OCR.")
+    if not OCR_SPACE_API_KEY:
+        raise ValueError("Add OCR_SPACE_API_KEY to your .env file or Streamlit Secrets to use photo OCR.")
 
     image_bytes = image_file.getvalue()
+    file_name = getattr(image_file, "name", "positions.jpg")
     mime_type = image_file.type or "image/jpeg"
-    encoded_image = base64.b64encode(image_bytes).decode("utf-8")
-
-    prompt = (
-        "Read the handwritten cabling position numbers in this image. "
-        "Return only valid position numbers, one per line, using the format "
-        "NN-NN-NNN-NN or NN-NN-NNN-NNN. Do not include the site prefix, bullets, "
-        "extra words, or guesses that do not match that format."
-    )
 
     response = requests.post(
-        "https://api.openai.com/v1/responses",
-        headers={
-            "Authorization": f"Bearer {OPENAI_API_KEY}",
-            "Content-Type": "application/json",
+        "https://api.ocr.space/parse/image",
+        headers={"apikey": OCR_SPACE_API_KEY},
+        data={
+            "language": "eng",
+            "isOverlayRequired": "false",
+            "detectOrientation": "true",
+            "scale": "true",
+            "OCREngine": "3",
         },
-        json={
-            "model": OPENAI_VISION_MODEL,
-            "input": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "input_text", "text": prompt},
-                        {
-                            "type": "input_image",
-                            "image_url": f"data:{mime_type};base64,{encoded_image}",
-                            "detail": "high",
-                        },
-                    ],
-                }
-            ],
-            "max_output_tokens": 500,
-        },
+        files={"file": (file_name, image_bytes, mime_type)},
         timeout=60,
     )
-    response.raise_for_status()
+    if response.status_code >= 400:
+        raise ValueError(f"OCR.space request failed: {response.text}")
 
-    extracted_text = response_output_text(response.json())
+    response_data = response.json()
+    if response_data.get("IsErroredOnProcessing"):
+        errors = response_data.get("ErrorMessage") or response_data.get("ErrorDetails")
+        if isinstance(errors, list):
+            errors = " ".join(errors)
+        raise ValueError(f"OCR.space request failed: {errors}")
+
+    extracted_text = "\n".join(
+        result.get("ParsedText", "")
+        for result in response_data.get("ParsedResults", [])
+    )
     positions = normalize_position_lines(extracted_text)
     if not positions:
         raise ValueError("No valid positions were found in the image.")
@@ -402,21 +393,43 @@ if submit_clicked:
             fusion_patched = ""
 
         positions = parsed_positions
+        if not positions:
+            raise ValueError("Enter at least one position before submitting.")
 
         results = []
-        for position in positions:
-            update_task(
-                position,
-                site,
-                fiber_ran,
-                copper_ran,
-                brick_patched,
-                fusion_patched,
-                runners,
-                brick_patcher,
-                fusion_patcher
-            )
-            results.append(position)
+        errors = []
+        task_map = get_project_task_map()
+        max_workers = min(4, len(positions))
+
+        with st.spinner(f"Updating {len(positions)} task(s) in Asana..."):
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {
+                    executor.submit(
+                        update_task,
+                        position,
+                        site,
+                        fiber_ran,
+                        copper_ran,
+                        brick_patched,
+                        fusion_patched,
+                        runners,
+                        brick_patcher,
+                        fusion_patcher,
+                        task_map.get(position),
+                    ): position
+                    for position in positions
+                }
+
+                for future in as_completed(futures):
+                    position = futures[future]
+                    try:
+                        future.result()
+                        results.append(position)
+                    except Exception as e:
+                        errors.append(f"{position}: {e}")
+
+        if errors:
+            raise ValueError("Some updates failed:\n" + "\n".join(errors))
 
         st.balloons()
         st.success(f"Updated {len(results)} tasks")
@@ -489,6 +502,11 @@ st.markdown(
             background: rgba(250, 250, 250, 0.14);
             color: rgb(250, 250, 250);
         }
+    }
+    footer,
+    [data-testid="stDecoration"],
+    [data-testid="stStatusWidget"] {
+        visibility: hidden;
     }
     </style>
     <div class="footer">Made by <a href="https://www.davidbyrke.com">David Byrke</a>   </div>
