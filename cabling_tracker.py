@@ -8,9 +8,14 @@ import base64
 load_dotenv()
 
 def get_config_value(name, default=None):
-    if name in st.secrets:
-        return st.secrets[name]
-    return os.getenv(name, default)
+    env_value = os.getenv(name)
+    if env_value is not None:
+        return env_value
+
+    try:
+        return st.secrets.get(name, default)
+    except st.errors.StreamlitSecretNotFoundError:
+        return default
 
 ASANA_TOKEN = get_config_value("ASANA_TOKEN")
 OPENAI_API_KEY = get_config_value("OPENAI_API_KEY")
@@ -104,6 +109,21 @@ def fetch_display_users():
     return display_users, user_lookup
 
 DISPLAY_USERS, USER_IDS = fetch_display_users()
+
+TEST_DISPLAY_USERS = [
+    "Alex Morgan",
+    "Bailey Chen",
+    "Casey Brooks",
+    "Drew Patel",
+    "Emery Johnson",
+    "Finley Garcia",
+    "Harper Lewis",
+    "Jordan Kim",
+    "Kai Thompson",
+    "Logan Rivera",
+    "Morgan Taylor",
+    "Quinn Anderson",
+]
 
 def people_values(names):
     if not names:
@@ -360,9 +380,15 @@ fusion_patched = st.radio("Fusion Patched", ["Patched", "Not Patched"], index=0,
 # brick_patched = st.selectbox("Brick Patched", ["-", "Patched", "Not Patched"])
 #fusion_patched = st.selectbox("Fusion Patched", ["-", "Patched", "Not Patched"])
 
-runners = st.multiselect("Runner(s)", DISPLAY_USERS)
-brick_patcher = st.multiselect("Brick Patcher(s)", DISPLAY_USERS)
-fusion_patcher = st.multiselect("Fusion Patcher(s)", DISPLAY_USERS)
+show_test_users = st.checkbox("Show test users", help="Adds fake names for testing the mobile people picker.")
+people_options = DISPLAY_USERS
+if show_test_users:
+    people_options = sorted(set(DISPLAY_USERS + TEST_DISPLAY_USERS))
+    st.caption("Test users are only for picker testing. Do not submit with test users selected.")
+
+runners = st.multiselect("Runner(s)", people_options)
+brick_patcher = st.multiselect("Brick Patcher(s)", people_options)
+fusion_patcher = st.multiselect("Fusion Patcher(s)", people_options)
 
 
 
@@ -423,6 +449,46 @@ st.markdown(
         font-size: 0.9rem;
         color: inherit;
         background-color: inherit;
+    }
+    div[role="radiogroup"] {
+        gap: 0.4rem;
+    }
+    div[role="radiogroup"] label {
+        margin: 0;
+        padding: 0.35rem 0.7rem;
+        min-height: 2.4rem;
+        border: 1px solid #8b919a;
+        border-radius: 8px;
+        background: #f0f2f6;
+        color: var(--text-color);
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+    }
+    div[role="radiogroup"] label:has(input:checked) {
+        border-color: rgb(255, 75, 75);
+        background: rgb(255, 75, 75);
+        color: #ffffff;
+    }
+    div[role="radiogroup"] label > div:first-child {
+        display: none;
+    }
+    div[role="radiogroup"] label > div {
+        padding: 0;
+    }
+    div[role="radiogroup"] label p {
+        margin: 0;
+        padding: 0;
+        line-height: 1.2;
+        color: inherit;
+    }
+    @media (prefers-color-scheme: dark) {
+        div[role="radiogroup"] label {
+            border-color: rgba(250, 250, 250, 0.3);
+            background: rgba(250, 250, 250, 0.14);
+            color: rgb(250, 250, 250);
+        }
     }
     </style>
     <div class="footer">Made by <a href="https://www.davidbyrke.com">David Byrke</a>   </div>
