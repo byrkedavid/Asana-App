@@ -163,9 +163,13 @@ def people_values(names):
 def update_task(position, site, fiber_ran, copper_ran, brick_patched, fusion_patched, runners, brick_patcher, fusion_patcher, task_gid=None):
     custom_fields = {
         FIELD_IDS["atl_site"]: SITE_OPTIONS[site],
-        FIELD_IDS["fiber_ran"]: ENUM_IDS["fiber_ran"][fiber_ran],
-        FIELD_IDS["copper_ran"]: ENUM_IDS["copper_ran"][copper_ran],
     }
+
+    if fiber_ran:
+        custom_fields[FIELD_IDS["fiber_ran"]] = ENUM_IDS["fiber_ran"][fiber_ran]
+
+    if copper_ran:
+        custom_fields[FIELD_IDS["copper_ran"]] = ENUM_IDS["copper_ran"][copper_ran]
 
     if brick_patched:
         custom_fields[FIELD_IDS["brick_patched"]] = ENUM_IDS["brick_patched"][brick_patched]
@@ -232,18 +236,22 @@ def get_existing_task_names():
 
 
 def normalize_position_lines(raw_text):
-    matches = re.findall(
-        r"\b\d{2}\s*[-\u2013\u2014]\s*\d{2}\s*[-\u2013\u2014]\s*\d{3}\s*[-\u2013\u2014]\s*\d{2,3}\b",
-        raw_text,
-    )
     positions = []
     seen = set()
+    pattern = re.compile(
+        r"\b(?:\d{2}\s*[-\u2013\u2014]\s*\d{2}\s*[-\u2013\u2014]\s*)?"
+        r"\d{3}\s*[-\u2013\u2014]\s*\d{2,3}\b"
+    )
 
-    for match in matches:
+    for match in pattern.findall(raw_text):
         parts = re.findall(r"\d+", match)
-        if len(parts) != 4:
+        if len(parts) == 4:
+            position = f"{parts[0]}-{parts[1]}-{parts[2]}-{parts[3]}"
+        elif len(parts) == 2:
+            position = f"{parts[0]}-{parts[1]}"
+        else:
             continue
-        position = f"{parts[0]}-{parts[1]}-{parts[2]}-{parts[3]}"
+
         if position not in seen:
             positions.append(position)
             seen.add(position)
@@ -355,6 +363,11 @@ parsed_positions = []
 missing_positions = []
 
 site = st.selectbox("Site", list(SITE_OPTIONS.keys()))
+position_prefix = st.text_input(
+    "Position prefix for shorthand rows",
+    placeholder="e.g. 01-01",
+    help="Used when positions are entered as row-rack only, like 005-23.",
+)
 
 if "positions_text" not in st.session_state:
     st.session_state["positions_text"] = ""
@@ -363,6 +376,7 @@ if "positions_file_version" not in st.session_state:
 
 with st.expander("Scan handwritten positions"):
     st.text("Take a photo on mobile or upload a clear image.")
+    st.caption("Image recognition can make mistakes. Please check for accuracy.")
     uploaded_positions_file = st.file_uploader(
         "Upload image or text file",
         type=["jpg", "jpeg", "png", "webp", "gif", "txt"],
@@ -382,23 +396,37 @@ with st.expander("Scan handwritten positions"):
 positions_text = st.text_area(
     "Positions (one per line)",
     key="positions_text",
-    placeholder="e.g.\n01-01-002-06\n01-01-003-15",
+    placeholder="e.g.\n01-01-002-06\n01-01-003-15\n\nor with prefix 01-01:\n002-06\n003-15",
 )
 
-def parse_positions(site, raw_text):
+def parse_positions(site, position_prefix, raw_text):
     positions = []
+    prefix = position_prefix.strip()
+
+    if prefix and not re.fullmatch(r"\d{2}-\d{2}", prefix):
+        raise ValueError(f"Invalid shorthand prefix: {prefix}")
+
     for line in raw_text.splitlines():
         cleaned = line.strip()
         if not cleaned:
             continue
-        if not re.fullmatch(r"\d{2}-\d{2}-\d{3}-\d{2,3}", cleaned):
+
+        if re.fullmatch(r"\d{2}-\d{2}-\d{3}-\d{2,3}", cleaned):
+            full_position = cleaned
+        elif re.fullmatch(r"\d{3}-\d{2,3}", cleaned):
+            if not prefix:
+                raise ValueError(f"Position needs prefix: {cleaned}")
+            full_position = f"{prefix}-{cleaned}"
+        else:
             raise ValueError(f"Invalid position format: {cleaned}")
-        positions.append(f"{site}.1-{cleaned}")
+
+        positions.append(f"{site}.1-{full_position}")
+
     return positions
 
 if positions_text.strip():
     try:
-        parsed_positions = parse_positions(site, positions_text)
+        parsed_positions = parse_positions(site, position_prefix, positions_text)
         existing_names = get_existing_task_names()
         missing_positions = [p for p in parsed_positions if p not in existing_names]
 
@@ -410,10 +438,10 @@ if positions_text.strip():
     except Exception as e:
         st.error(str(e))
 
-fiber_ran = st.radio("Fiber Ran", ["Yes", "No"], index=0, horizontal=True)
-copper_ran = st.radio("Copper Ran", ["Yes", "No"], index=0, horizontal=True)
-brick_patched = st.radio("Brick Patched", ["Patched", "Not Patched"], index=0, horizontal=True)
-fusion_patched = st.radio("Fusion Patched", ["Patched", "Not Patched"], index=0, horizontal=True)
+fiber_ran = st.radio("Fiber Ran", ["Leave unchanged", "Yes", "No"], index=0, horizontal=True)
+copper_ran = st.radio("Copper Ran", ["Leave unchanged", "Yes", "No"], index=0, horizontal=True)
+brick_patched = st.radio("Brick Patched", ["Leave unchanged", "Patched", "Not Patched"], index=0, horizontal=True)
+fusion_patched = st.radio("Fusion Patched", ["Leave unchanged", "Patched", "Not Patched"], index=0, horizontal=True)
 
 show_test_users = st.checkbox("Show test users", help="Adds fake names for testing the mobile people picker.")
 people_options = DISPLAY_USERS
@@ -431,6 +459,15 @@ submit_clicked = st.button("Submit", disabled=bool(missing_positions))
 
 if submit_clicked:
     try:
+        if fiber_ran == "Leave unchanged":
+            fiber_ran = ""
+        if copper_ran == "Leave unchanged":
+            copper_ran = ""
+        if brick_patched == "Leave unchanged":
+            brick_patched = ""
+        if fusion_patched == "Leave unchanged":
+            fusion_patched = ""
+
         positions = parsed_positions
         if not positions:
             raise ValueError("Enter at least one position before submitting.")
@@ -492,8 +529,8 @@ if "last_submit_results" in st.session_state:
 st.divider()
 st.markdown("### Instructions")
 st.markdown("""1. Select the site from the dropdown.
-2. Paste the list of positions (one per line), or scan handwritten positions from the photo section. The format should be `XX-XX-XXX-XX` or `XX-XX-XXX-XXX` (e.g. `01-01-002-06`).
-3. Fill out the fields for fiber/copper ran, patching status, and personnel.
+2. Paste the list of positions (one per line), or scan handwritten positions from the photo section. Use full positions like `01-01-002-06`, or enter a shorthand prefix like `01-01` and paste row-rack values like `002-06`.
+3. Set only the fiber/copper, patching status, and personnel fields you want to update. Leave status buttons on `Leave unchanged` to skip those fields.
 4. Click Submit to apply the updates to all listed positions. Note that all positions must already exist as tasks in Asana, and the personnel names must match existing users.""")
 
 st.markdown(
