@@ -3,7 +3,9 @@ import os
 from dotenv import load_dotenv
 import streamlit as st
 import re
+from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from PIL import Image, ImageOps
 
 load_dotenv()
 
@@ -24,6 +26,7 @@ def get_config_value(name, default=None):
 
 ASANA_TOKEN = get_config_value("ASANA_TOKEN")
 OCR_SPACE_API_KEY = get_config_value("OCR_SPACE_API_KEY")
+OCR_SPACE_ENGINE = get_config_value("OCR_SPACE_ENGINE", "2")
 WORKSPACE_ID = "1214051352006115"
 PROJECT_ID = "1214024107011760"
 
@@ -248,27 +251,68 @@ def normalize_position_lines(raw_text):
     return "\n".join(positions)
 
 
+def prepare_image_for_ocr_space(image_file):
+    max_size_bytes = 700 * 1024
+    image = Image.open(image_file)
+    image = ImageOps.exif_transpose(image)
+
+    if image.mode not in ("RGB", "L"):
+        image = image.convert("RGB")
+
+    longest_side = max(image.size)
+    if longest_side > 1200:
+        scale = 1200 / longest_side
+        new_size = (
+            max(1, int(image.width * scale)),
+            max(1, int(image.height * scale)),
+        )
+        image = image.resize(new_size, Image.Resampling.LANCZOS)
+
+    for quality in (80, 70, 60, 50, 40):
+        buffer = BytesIO()
+        image.save(buffer, format="JPEG", quality=quality, optimize=True)
+        if buffer.tell() <= max_size_bytes:
+            return buffer.getvalue(), "positions.jpg", "image/jpeg"
+
+    while True:
+        image = image.resize(
+            (
+                max(1, int(image.width * 0.85)),
+                max(1, int(image.height * 0.85)),
+            ),
+            Image.Resampling.LANCZOS,
+        )
+        buffer = BytesIO()
+        image.save(buffer, format="JPEG", quality=40, optimize=True)
+        if buffer.tell() <= max_size_bytes or max(image.size) <= 700:
+            return buffer.getvalue(), "positions.jpg", "image/jpeg"
+
+
 def extract_positions_from_image(image_file):
     if not OCR_SPACE_API_KEY:
         raise ValueError("Add OCR_SPACE_API_KEY to your .env file or Streamlit Secrets to use photo OCR.")
 
-    image_bytes = image_file.getvalue()
-    file_name = getattr(image_file, "name", "positions.jpg")
-    mime_type = image_file.type or "image/jpeg"
+    image_bytes, file_name, mime_type = prepare_image_for_ocr_space(image_file)
 
-    response = requests.post(
-        "https://api.ocr.space/parse/image",
-        headers={"apikey": OCR_SPACE_API_KEY},
-        data={
-            "language": "eng",
-            "isOverlayRequired": "false",
-            "detectOrientation": "true",
-            "scale": "true",
-            "OCREngine": "3",
-        },
-        files={"file": (file_name, image_bytes, mime_type)},
-        timeout=60,
-    )
+    try:
+        response = requests.post(
+            "https://api.ocr.space/parse/image",
+            headers={"apikey": OCR_SPACE_API_KEY},
+            data={
+                "language": "eng",
+                "isOverlayRequired": "false",
+                "detectOrientation": "true",
+                "scale": "true",
+                "OCREngine": OCR_SPACE_ENGINE,
+            },
+            files={"file": (file_name, image_bytes, mime_type)},
+            timeout=120,
+        )
+    except requests.exceptions.ReadTimeout:
+        raise ValueError(
+            "OCR.space timed out while reading the image. Try again in a minute, "
+            "or retake the photo closer to the paper with less background."
+        )
     if response.status_code >= 400:
         raise ValueError(f"OCR.space request failed: {response.text}")
 
@@ -314,19 +358,23 @@ site = st.selectbox("Site", list(SITE_OPTIONS.keys()))
 
 if "positions_text" not in st.session_state:
     st.session_state["positions_text"] = ""
+if "positions_file_version" not in st.session_state:
+    st.session_state["positions_file_version"] = 0
 
 with st.expander("Scan handwritten positions"):
     st.text("Take a photo on mobile or upload a clear image.")
-    camera_image = st.camera_input("Take a photo")
     uploaded_positions_file = st.file_uploader(
         "Upload image or text file",
         type=["jpg", "jpeg", "png", "webp", "gif", "txt"],
+        key=f"positions_file_{st.session_state['positions_file_version']}",
     )
-    positions_source = camera_image or uploaded_positions_file
+    positions_source = uploaded_positions_file
 
     if st.button("Fill positions from photo/file", disabled=positions_source is None):
         try:
-            st.session_state["positions_text"] = read_positions_from_file(positions_source)
+            with st.spinner("Reading positions from image..."):
+                st.session_state["positions_text"] = read_positions_from_file(positions_source)
+            st.session_state["positions_file_version"] += 1
             st.rerun()
         except Exception as e:
             st.error(str(e))
@@ -366,10 +414,6 @@ fiber_ran = st.radio("Fiber Ran", ["Yes", "No"], index=0, horizontal=True)
 copper_ran = st.radio("Copper Ran", ["Yes", "No"], index=0, horizontal=True)
 brick_patched = st.radio("Brick Patched", ["Patched", "Not Patched"], index=0, horizontal=True)
 fusion_patched = st.radio("Fusion Patched", ["Patched", "Not Patched"], index=0, horizontal=True)
-# fiber_ran = st.selectbox("Fiber Ran", ["No", "Yes"])
-# copper_ran = st.selectbox("Copper Ran", ["No", "Yes"])
-# brick_patched = st.selectbox("Brick Patched", ["-", "Patched", "Not Patched"])
-#fusion_patched = st.selectbox("Fusion Patched", ["-", "Patched", "Not Patched"])
 
 show_test_users = st.checkbox("Show test users", help="Adds fake names for testing the mobile people picker.")
 people_options = DISPLAY_USERS
@@ -387,11 +431,6 @@ submit_clicked = st.button("Submit", disabled=bool(missing_positions))
 
 if submit_clicked:
     try:
-        if brick_patched == "-":
-            brick_patched = ""
-        if fusion_patched == "-":
-            fusion_patched = ""
-
         positions = parsed_positions
         if not positions:
             raise ValueError("Enter at least one position before submitting.")
@@ -431,14 +470,24 @@ if submit_clicked:
         if errors:
             raise ValueError("Some updates failed:\n" + "\n".join(errors))
 
-        st.balloons()
-        st.success(f"Updated {len(results)} tasks")
-        with st.expander("View updated positions"):
-            for pos in results:
-                st.markdown(f"- {pos}")
+        st.session_state["last_submit_results"] = [
+            position
+            for position in positions
+            if position in results
+        ]
+        st.session_state["positions_file_version"] += 1
+        st.rerun()
 
     except Exception as e:
         st.error(str(e))
+
+if "last_submit_results" in st.session_state:
+    results = st.session_state.pop("last_submit_results")
+    st.balloons()
+    st.success(f"Updated {len(results)} tasks")
+    with st.expander("View updated positions"):
+        for pos in results:
+            st.markdown(f"- {pos}")
 
 st.divider()
 st.markdown("### Instructions")
@@ -503,10 +552,15 @@ st.markdown(
             color: rgb(250, 250, 250);
         }
     }
+    #MainMenu,
     footer,
+    header,
+    [data-testid="stToolbar"],
     [data-testid="stDecoration"],
-    [data-testid="stStatusWidget"] {
-        visibility: hidden;
+    [data-testid="stStatusWidget"],
+    [data-testid="stDeployButton"] {
+        display: none !important;
+        visibility: hidden !important;
     }
     </style>
     <div class="footer">Made by <a href="https://www.davidbyrke.com">David Byrke</a>   </div>
