@@ -235,6 +235,24 @@ def get_existing_task_names():
     return set(get_project_task_map().keys())
 
 
+def get_position_picker_options(site, position_prefix):
+    site_prefix = f"{site}.1-"
+    prefix = position_prefix.strip()
+    positions = []
+
+    for task_name in get_project_task_map():
+        if not task_name.startswith(site_prefix):
+            continue
+
+        display_position = task_name.removeprefix(site_prefix)
+        if prefix and not display_position.startswith(prefix):
+            continue
+
+        positions.append(display_position)
+
+    return sorted(positions)
+
+
 def normalize_position_lines(raw_text):
     positions = []
     seen = set()
@@ -373,31 +391,58 @@ if "positions_text" not in st.session_state:
     st.session_state["positions_text"] = ""
 if "positions_file_version" not in st.session_state:
     st.session_state["positions_file_version"] = 0
+if "selected_positions" not in st.session_state:
+    st.session_state["selected_positions"] = []
 
-with st.expander("Scan handwritten positions"):
-    st.text("Take a photo on mobile or upload a clear image.")
-    st.caption("Image recognition can make mistakes. Please check for accuracy.")
-    uploaded_positions_file = st.file_uploader(
-        "Upload image or text file",
-        type=["jpg", "jpeg", "png", "webp", "gif", "txt"],
-        key=f"positions_file_{st.session_state['positions_file_version']}",
-    )
-    positions_source = uploaded_positions_file
-
-    if st.button("Fill positions from photo/file", disabled=positions_source is None):
-        try:
-            with st.spinner("Reading positions from image..."):
-                st.session_state["positions_text"] = read_positions_from_file(positions_source)
-            st.session_state["positions_file_version"] += 1
-            st.rerun()
-        except Exception as e:
-            st.error(str(e))
-
-positions_text = st.text_area(
-    "Positions (one per line)",
-    key="positions_text",
-    placeholder="e.g.\n01-01-002-06\n01-01-003-15\n\nor with prefix 01-01:\n002-06\n003-15",
+position_entry_mode = st.radio(
+    "Position entry",
+    ["Type or scan", "Select from Asana"],
+    horizontal=True,
 )
+
+positions_text = ""
+selected_positions = []
+
+if position_entry_mode == "Type or scan":
+    with st.expander("Scan handwritten positions"):
+        st.text("Take a photo on mobile or upload a clear image.")
+        st.caption("Note: Image recognition can make mistakes. Please review text for accuracy.")
+        uploaded_positions_file = st.file_uploader(
+            "Upload image or text file",
+            type=["jpg", "jpeg", "png", "webp", "gif", "txt"],
+            key=f"positions_file_{st.session_state['positions_file_version']}",
+        )
+        positions_source = uploaded_positions_file
+
+        if st.button("Fill positions from photo/file", disabled=positions_source is None):
+            try:
+                with st.spinner("Reading positions from image..."):
+                    st.session_state["positions_text"] = read_positions_from_file(positions_source)
+                st.session_state["positions_file_version"] += 1
+                st.rerun()
+            except Exception as e:
+                st.error(str(e))
+
+    positions_text = st.text_area(
+        "Positions (one per line)",
+        key="positions_text",
+        placeholder="e.g.\n01-01-002-06\n01-01-003-15\n\nor with prefix 01-01:\n002-06\n003-15",
+        height=160,
+    )
+else:
+    position_options = get_position_picker_options(site, position_prefix)
+    st.caption(f"{len(position_options)} position(s) available for the selected site/prefix.")
+    st.session_state["selected_positions"] = [
+        position
+        for position in st.session_state["selected_positions"]
+        if position in position_options
+    ]
+    selected_positions = st.multiselect(
+        "Positions",
+        position_options,
+        key="selected_positions",
+        placeholder="Start typing a position",
+    )
 
 def parse_positions(site, position_prefix, raw_text):
     positions = []
@@ -424,7 +469,9 @@ def parse_positions(site, position_prefix, raw_text):
 
     return positions
 
-if positions_text.strip():
+if position_entry_mode == "Select from Asana":
+    parsed_positions = [f"{site}.1-{position}" for position in selected_positions]
+elif positions_text.strip():
     try:
         parsed_positions = parse_positions(site, position_prefix, positions_text)
         existing_names = get_existing_task_names()
@@ -529,9 +576,10 @@ if "last_submit_results" in st.session_state:
 st.divider()
 st.markdown("### Instructions")
 st.markdown("""1. Select the site from the dropdown.
-2. Paste the list of positions (one per line), or scan handwritten positions from the photo section. Use full positions like `01-01-002-06`, or enter a shorthand prefix like `01-01` and paste row-rack values like `002-06`.
-3. Set only the fiber/copper, patching status, and personnel fields you want to update. Leave status buttons on `Leave unchanged` to skip those fields.
-4. Click Submit to apply the updates to all listed positions. Note that all positions must already exist as tasks in Asana, and the personnel names must match existing users.""")
+2. Choose whether to type/scan positions or select existing positions from Asana.
+3. Use full positions like `01-01-002-06`, or enter a shorthand prefix like `01-01` and use row-rack values like `002-06`. In selection mode, leaving the prefix blank shows all positions for that site.
+4. Set only the fiber/copper, patching status, and personnel fields you want to update. Leave status buttons on `Leave unchanged` to skip those fields.
+5. Click Submit to apply the updates. Note that personnel names must match existing Asana users.""")
 
 st.markdown(
     """
