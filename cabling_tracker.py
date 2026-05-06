@@ -373,7 +373,7 @@ def read_positions_from_file(uploaded_file):
 
 
 ## Web App
-st.title("Cabling Tracker")
+st.title("Batch Updater")
 st.text("Note: Settings will apply to all listed positions.")
 
 SITE_OPTIONS = get_site_options()
